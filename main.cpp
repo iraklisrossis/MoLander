@@ -12,9 +12,12 @@ using namespace NativeUI;
 
 #define NUM_SEGMENTS 100
 #define TEXTURE_REPEATS 10
-#define ENGINE_ACC 1.0f
-#define GRAVITY_ACC 0.1f
-#define SECONDS_TO_FULL_POWER 2.0f;
+#define ENGINE_ACC 500
+#define GRAVITY_ACC 100
+#define MAX_SPEED 3000
+#define LANDING_SPEED 500
+#define LABEL_UPDATE_PER 300
+#define SCALE 1000
 
 struct landSegment{
 	GLfloat vcoords[4][3];
@@ -22,9 +25,40 @@ struct landSegment{
 };
 
 struct vector{
+	int x;
+	int y;
+	int z;
+};
+
+struct vectorf{
 	float x;
 	float y;
 	float z;
+};
+
+// A simple low pass filter used to
+// smoothen the noisy accelerometer
+// data.
+struct LowPassFilter {
+	LowPassFilter() :
+		// this constant sets the cutoff for the filter.
+		// It must be a value between 0 and 1, where
+		// 0 means no filtering (everything is passed through)
+		// and 1 that no signal is passed through.
+		a(0.80f)
+	{
+		b = 1.0f - a;
+	}
+
+	vectorf filter(const vectorf& in) {
+		previousState.x = (in.x * b) + (previousState.x * a);
+		previousState.y = (in.y * b) + (previousState.y * a);
+		previousState.z = (in.z * b) + (previousState.z * a);
+		return previousState;
+	}
+
+	float a, b;
+	vectorf previousState;
 };
 /**
  * Moblet to be used as a template for a Native UI application.
@@ -43,7 +77,7 @@ public:
 
 		mPosition.x = 0;
 		mPosition.y = 0;
-		mPosition.z = 90;
+		mPosition.z = 90000;
 
 		mVelocity.x=0;
 		mVelocity.y=0;
@@ -59,8 +93,8 @@ public:
 
 		mEnginesRunning = false;
 
-		mFacing.x=0.00001;
-		mFacing.y=0.00001;
+		mFacing.x=0;
+		mFacing.y=0;
 		mFacing.z = -1;
 		Environment::getEnvironment().addTimer(this,10,0);
 		Environment::getEnvironment().addSensorListener(this);
@@ -81,16 +115,31 @@ public:
 	 */
 	void createUI()
 	{
+		MAExtent ex = maGetScrSize();
+		int screenWidth = EXTENT_X(ex);
+		int screenHeight = EXTENT_Y(ex);
 		// Create a NativeUI screen that will hold layout and widgets.
 		mScreen = new Screen();
+
+		mLabel = new Label();
+		mLabel->fillSpaceHorizontally();
+		mLabel->fillSpaceVertically();
+		mLabel->setMaxNumberOfLines(4);
+		mLabel->setFontSize(12);
 		//The widget that renders the animation
 		mGLView = new GLView(MAW_GL_VIEW);
 		mGLView->addGLViewListener(this);
 		mGLView->fillSpaceHorizontally();
-		mGLView->fillSpaceVertically();
+		mGLView->setHeight(screenHeight * 0.85);
+
+		VerticalLayout *vLayout = new VerticalLayout();
+		vLayout->fillSpaceHorizontally();
+		vLayout->fillSpaceVertically();
+		vLayout->addChild(mLabel);
+		vLayout->addChild(mGLView);
 
 		//Add the layout to the screen
-		mScreen->setMainWidget(mGLView);
+		mScreen->setMainWidget(vLayout);
 
 		//Show the screen
 		mScreen->show();
@@ -98,8 +147,8 @@ public:
 
 	void createLandscape()
 	{
-		GLfloat baseVCoords[9][3];
-		GLfloat baseTCoords[9][2];
+		GLfloat baseVCoords[4][3];
+		GLfloat baseTCoords[4][2];
 
 		baseTCoords[0][0] = 0.0f;  baseTCoords[0][1] = 0.0f;
 		baseVCoords[0][0] = -1.0f; baseVCoords[0][1] = -1.0f; baseVCoords[0][2] = 0.0f;
@@ -117,9 +166,9 @@ public:
 			{
 				for(int i = 0; i < 4; i++)
 				{
-					mLandscape[x][y].vcoords[i][0] = 200.0f * ((x - NUM_SEGMENTS/2) * 2 + baseVCoords[i][0]) / NUM_SEGMENTS;
-					mLandscape[x][y].vcoords[i][1] = 200.0f * ((y - NUM_SEGMENTS/2) * 2 + baseVCoords[i][1]) / NUM_SEGMENTS;
-					mLandscape[x][y].vcoords[i][2] = 10.0f * getPointHeight(mLandscape[x][y].vcoords[i][0], mLandscape[x][y].vcoords[i][1]);
+					mLandscape[x][y].vcoords[i][0] = 200000.0f * ((x - NUM_SEGMENTS/2) * 2 + baseVCoords[i][0]) / NUM_SEGMENTS;
+					mLandscape[x][y].vcoords[i][1] = 200000.0f * ((y - NUM_SEGMENTS/2) * 2 + baseVCoords[i][1]) / NUM_SEGMENTS;
+					mLandscape[x][y].vcoords[i][2] = 10000.0f * getPointHeight(mLandscape[x][y].vcoords[i][0], mLandscape[x][y].vcoords[i][1]);
 
 					mLandscape[x][y].tcoords[i][0] = ((x % TEXTURE_REPEATS) / segmentsPerTexture) + ((1.0f / segmentsPerTexture) * baseTCoords[i][0]); //* 0.8f;
 					mLandscape[x][y].tcoords[i][1] = ((y % TEXTURE_REPEATS) / segmentsPerTexture) + ((1.0f / segmentsPerTexture) * baseTCoords[i][1]); //* 0.8f;
@@ -130,7 +179,7 @@ public:
 
 	float getPointHeight(float x, float y)
 	{
-		float freq = 0.03;
+		float freq = 0.00003;
 		float value = (cos(y*freq*2*M_PI) + cos(x*freq*2*M_PI))/2;
 		return (value>0)?value:0;
 	}
@@ -176,7 +225,7 @@ public:
 		// Set the depth value used when clearing the depth buffer.
 		glClearDepthf(1.0f);
 
-		glEnable(GL_BLEND);
+		//glEnable(GL_BLEND);
 
 		glBlendFunc(GL_ONE, GL_ONE);
 
@@ -198,7 +247,7 @@ public:
 		glLoadIdentity();
 
 		GLfloat ratio = (GLfloat)width / (GLfloat)height;
-		gluPerspective(45.0f, ratio, 0.1f, 100.0f);
+		gluPerspective(45.0f, ratio, 100.0f, 100000.0f);
 	}
 
 	/**
@@ -236,30 +285,11 @@ public:
 	void sensorEvent(MASensor a)
 	{
 
-		float fx = -roundDown(a.values[0]);
-		float fy = roundDown(a.values[1]);
-		float fz = roundDown(a.values[2]);
+		mFacing.x = -a.values[0];
+		mFacing.y = a.values[1];
+		mFacing.z = a.values[2];
 
-		mFacing.x = (fx == 0)?0.0001:fx;
-		mFacing.y = (fy == 0)?0.0001:fy;
-		mFacing.z = (fz == 0)?0.0001:fz;
-	}
-
-	float roundDown(float x)
-	{
-		x = x * 10000;
-		long xint = (int)x;
-		return xint / 10000.0f;
-	}
-
-	/**
-	* This method is called if the touch-up event was inside the
-	* bounds of the button.
-	* @param button The button object that generated the event.
-	*/
-	virtual void buttonClicked(Widget* button)
-	{
-		((Button*) button)->setText("Hello World");
+		mFacing = mFilter.filter(mFacing);
 	}
 
 	void runTimerEvent()
@@ -269,13 +299,23 @@ public:
 		{
 			//Get the current system time
 			int currentTime = maGetMilliSecondCount();
-			float period = (currentTime-mPrevTime)/1000.0f;
-			calculateAcceleration(period);
-			calculatePosition(period);
+			int period = currentTime-mPrevTime;
+			calculateAcceleration(period/1000.0f);
+			calculatePosition(period/1000.0f);
 			//Calculate and draw the positions for the new frame
 			checkCollision();
 			draw(currentTime);
-
+			mSecondsSinceLastUpdate += period;
+			if(mSecondsSinceLastUpdate > LABEL_UPDATE_PER)
+			{
+				mSecondsSinceLastUpdate = 0;
+				char buffer[256];
+				int absSpeed = sqrt(mVelocity.x*mVelocity.x + mVelocity.y*mVelocity.y + mVelocity.z*mVelocity.z);
+				sprintf(buffer,
+				" Position - x:%d, y:%d, z:%d\n Speed - x:%d, y:%d, z:%d\n Absolute speed:%d, altitude:%d\n Segment - x:%d, y:%d",
+						mPosition.x,mPosition.y,mPosition.z,mVelocity.x,mVelocity.y,mVelocity.z,absSpeed,mAltitude,mX,mY);
+				mLabel->setText(buffer);
+			}
 			mPrevTime = currentTime;
 		}
 	}
@@ -292,7 +332,7 @@ public:
 			enginePower = 0;
 		}
 		mAcceleration.x = -mFacing.x * enginePower;
-		mAcceleration.y = -mFacing.y * enginePower;
+		mAcceleration.y = mFacing.y * enginePower;
 		mAcceleration.z = -mFacing.z * enginePower;
 	}
 
@@ -302,9 +342,14 @@ public:
 		mVelocity.y += (mGravity.y + mAcceleration.y) * period;
 		mVelocity.z += (mGravity.z + mAcceleration.z) * period;
 
-		/*mVelocity.x += mGravity.x * period;
-		mVelocity.y += mGravity.y * period;
-		mVelocity.z += mGravity.z * period;*/
+		float velocity = sqrt(mVelocity.x*mVelocity.x + mVelocity.y*mVelocity.y + mVelocity.z*mVelocity.z);
+
+		if(velocity > MAX_SPEED)
+		{
+			mVelocity.x = MAX_SPEED * (float)mVelocity.x/velocity;
+			mVelocity.y = MAX_SPEED * (float)mVelocity.y/velocity;
+			mVelocity.z = MAX_SPEED * (float)mVelocity.z/velocity;
+		}
 
 		mPosition.x += mVelocity.x * period;
 		mPosition.y += mVelocity.y * period;
@@ -313,13 +358,62 @@ public:
 
 	void checkCollision()
 	{
-		for(int x = 0; x < NUM_SEGMENTS; x++)
+		/*for(int x = 0; x < NUM_SEGMENTS; x++)
 		{
 			for(int y = 0; y < NUM_SEGMENTS; y++)
 			{
+				landSegment* segment = &mLandscape[x][y];
+				if(	segment->vcoords[0][0] < mPosition.x &&
+					segment->vcoords[2][0] > mPosition.x &&
+					segment->vcoords[0][1] < mPosition.y &&
+					segment->vcoords[2][1] > mPosition.y)
+				{
+					mX = x;
+					mY = y;
+					vector plane[3];
+					float dx1 = segment->vcoords[1][0] - mPosition.x;
+					float dy1 = segment->vcoords[1][1] - mPosition.y;
+					float dx3 = segment->vcoords[3][0] - mPosition.x;
+					float dx3 = segment->vcoords[3][1] - mPosition.y;
+					float d1 = dx1 * dx1 + dy1 * dy1;
+					float d3 = dx3 * dx3 + dy3 * dy3;
+					if(d1 < d3)
+					{
+						plane[0].x = segment->vcoords[0][0];
+						plane[0].y = segment->vcoords[0][1];
+						plane[0].z = segment->vcoords[0][2];
 
+						plane[1].x = segment->vcoords[1][0];
+						plane[1].y = segment->vcoords[1][1];
+						plane[1].z = segment->vcoords[1][2];
+
+						plane[2].x = segment->vcoords[2][0];
+						plane[2].y = segment->vcoords[2][1];
+						plane[2].z = segment->vcoords[2][2];
+					}
+					else
+					{
+						plane[0].x = segment->vcoords[0][0];
+						plane[0].y = segment->vcoords[0][1];
+						plane[0].z = segment->vcoords[0][2];
+
+						plane[1].x = segment->vcoords[2][0];
+						plane[1].y = segment->vcoords[2][1];
+						plane[1].z = segment->vcoords[2][2];
+
+						plane[2].x = segment->vcoords[3][0];
+						plane[2].y = segment->vcoords[3][1];
+						plane[2].z = segment->vcoords[3][2];
+					}
+					vector planeVector;
+					planeVector.x = (plane[0].x + plane[1].x + plane[2].x) / 3;
+					planeVector.y = (plane[0].y + plane[1].y + plane[2].y) / 3;
+					planeVector.z = (plane[0].z + plane[1].z + plane[2].z) / 3;
+
+
+				}
 			}
-		}
+		}*/
 	}
 
 	void draw(int currentTime)
@@ -369,12 +463,12 @@ public:
 		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 		//glEnableClientState( GL_COLOR_ARRAY );
 		// Set up the color array.
-		GLfloat colors[4*4] = {
+		/*GLfloat colors[4*4] = {
 				1.0f, 0.0f, 0.0f, 1.0f,
 				0.0f, 1.0f, 0.0f, 1.0f,
 				0.0f, 0.0f, 1.0f, 1.0f,
 				1.0f, 1.0f, 0.0f, 1.0f
-			};
+			};*/
 		for(int x = 0; x < NUM_SEGMENTS; x++) {
 			for(int y = 0; y < NUM_SEGMENTS; y++) {
 				// Set pointers to vertex coordinates and texture coordinates.
@@ -409,7 +503,11 @@ public:
 
 private:
     Screen* mScreen;			//A Native UI screen
+    Label* mLabel;
     GLView* mGLView;
+    int mX, mY;
+    int mAltitude;
+    int mSecondsSinceLastUpdate;
     int mPrevTime;
     GLuint mLunarTexture;
     bool mEnvironmentInitialized;
@@ -417,9 +515,10 @@ private:
     vector mVelocity;
     vector mPosition;
     vector mGravity;
-    vector mFacing;
+    vectorf mFacing;
     vector mAcceleration;
     bool mEnginesRunning;
+    LowPassFilter mFilter;
 };
 
 /**
