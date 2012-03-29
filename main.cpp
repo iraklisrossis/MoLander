@@ -317,7 +317,68 @@ public:
 		{
 			for(int y = 0; y < NUM_SEGMENTS; y++)
 			{
+				landSegment* segment = &mLandscape[x][y];
+				if(	segment->vcoords[0][0] < mPosition.x &&
+					segment->vcoords[2][0] > mPosition.x &&
+					segment->vcoords[0][1] < mPosition.y &&
+					segment->vcoords[2][1] > mPosition.y)
+				{
+					mX = x;
+					mY = y;
+					vector plane[3];
+					float dx1 = segment->vcoords[1][0] - mPosition.x;
+					float dy1 = segment->vcoords[1][1] - mPosition.y;
+					float dx3 = segment->vcoords[3][0] - mPosition.x;
+					float dy3 = segment->vcoords[3][1] - mPosition.y;
+					float d1 = dx1 * dx1 + dy1 * dy1;
+					float d3 = dx3 * dx3 + dy3 * dy3;
+					if(d1 < d3)
+					{
+						plane[0].x = segment->vcoords[0][0];
+						plane[0].y = segment->vcoords[0][1];
+						plane[0].z = segment->vcoords[0][2];
 
+						plane[1].x = segment->vcoords[1][0];
+						plane[1].y = segment->vcoords[1][1];
+						plane[1].z = segment->vcoords[1][2];
+
+						plane[2].x = segment->vcoords[2][0];
+						plane[2].y = segment->vcoords[2][1];
+						plane[2].z = segment->vcoords[2][2];
+					}
+					else
+					{
+						plane[0].x = segment->vcoords[0][0];
+						plane[0].y = segment->vcoords[0][1];
+						plane[0].z = segment->vcoords[0][2];
+
+						plane[1].x = segment->vcoords[2][0];
+						plane[1].y = segment->vcoords[2][1];
+						plane[1].z = segment->vcoords[2][2];
+
+						plane[2].x = segment->vcoords[3][0];
+						plane[2].y = segment->vcoords[3][1];
+						plane[2].z = segment->vcoords[3][2];
+					}
+					vector planeVector;
+					planeVector.x = (plane[0].x + plane[1].x + plane[2].x) / 3;
+					planeVector.y = (plane[0].y + plane[1].y + plane[2].y) / 3;
+					planeVector.z = (plane[0].z + plane[1].z + plane[2].z) / 3;
+
+					float D = sqrt(planeVector.x*planeVector.x + planeVector.y*planeVector.y + planeVector.z*planeVector.z);
+
+					vector npv;
+					npv.x = planeVector.x / D;
+					npv.z = planeVector.y / D;
+					npv.y = planeVector.z / D;
+
+					if(npv.x*mPosition.x + npv.y*mPosition.y + npv.z*mPosition.z < -D)
+					{
+						maAlert("collision","sfdfsfd","OK",NULL,NULL);
+					}
+
+
+				}
 			}
 		}
 	}
@@ -411,6 +472,8 @@ private:
     Screen* mScreen;			//A Native UI screen
     GLView* mGLView;
     int mPrevTime;
+    int mX;
+    int mY;
     GLuint mLunarTexture;
     bool mEnvironmentInitialized;
     landSegment mLandscape[NUM_SEGMENTS][NUM_SEGMENTS];
