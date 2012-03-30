@@ -6,6 +6,7 @@
 #include <GLES/gl.h>
 #include "MAHeaders.h"
 #include <madmath.h>
+#include "LuaEngine.h"
 
 using namespace MAUtil;
 using namespace NativeUI;
@@ -68,6 +69,10 @@ public:
 	 */
 	NativeUIMoblet()
 	{
+		if (!mLua.initialize())
+		{
+			maPanic(0,"Lua engine failed to initialize");
+		}
 		mPrevTime = maGetMilliSecondCount();
 		createUI();
 		createLandscape();
@@ -560,6 +565,7 @@ private:
     vector mNormal;
     bool mEnginesRunning;
     LowPassFilter mFilter;
+    MobileLua::LuaEngine mLua;
 };
 
 /**
