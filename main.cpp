@@ -12,19 +12,50 @@ using namespace NativeUI;
 
 #define NUM_SEGMENTS 100
 #define TEXTURE_REPEATS 10
-#define ENGINE_ACC 1.0f
+#define ENGINE_ACC 0.5f
 #define GRAVITY_ACC 0.1f
-#define SECONDS_TO_FULL_POWER 2.0f;
+#define MAX_SPEED 3.0f
+#define LANDING_SPEED 1.0f
+#define LANDING_DEVIATION 0.3f
+#define LABEL_UPDATE_PER 0.3f
 
-struct landSegment{
-	GLfloat vcoords[4][3];
-	GLfloat tcoords[4][2];
-};
 
 struct vector{
 	float x;
 	float y;
 	float z;
+};
+
+struct landSegment{
+	GLfloat vcoords[4][3];
+	GLfloat tcoords[4][2];
+	vector normalVector[2];
+	float distance[2];
+};
+
+// A simple low pass filter used to
+// smoothen the noisy accelerometer
+// data.
+struct LowPassFilter {
+	LowPassFilter() :
+		// this constant sets the cutoff for the filter.
+		// It must be a value between 0 and 1, where
+		// 0 means no filtering (everything is passed through)
+		// and 1 that no signal is passed through.
+		a(0.80f)
+	{
+		b = 1.0f - a;
+	}
+
+	vector filter(const vector& in) {
+		previousState.x = (in.x * b) + (previousState.x * a);
+		previousState.y = (in.y * b) + (previousState.y * a);
+		previousState.z = (in.z * b) + (previousState.z * a);
+		return previousState;
+	}
+
+	float a, b;
+	vector previousState;
 };
 /**
  * Moblet to be used as a template for a Native UI application.
@@ -43,7 +74,7 @@ public:
 
 		mPosition.x = 0;
 		mPosition.y = 0;
-		mPosition.z = 90;
+		mPosition.z = 40;
 
 		mVelocity.x=0;
 		mVelocity.y=0;
@@ -59,8 +90,8 @@ public:
 
 		mEnginesRunning = false;
 
-		mFacing.x=0.00001;
-		mFacing.y=0.00001;
+		mFacing.x=0;
+		mFacing.y=0;
 		mFacing.z = -1;
 		Environment::getEnvironment().addTimer(this,10,0);
 		Environment::getEnvironment().addSensorListener(this);
@@ -81,16 +112,31 @@ public:
 	 */
 	void createUI()
 	{
+		MAExtent ex = maGetScrSize();
+		int screenWidth = EXTENT_X(ex);
+		int screenHeight = EXTENT_Y(ex);
 		// Create a NativeUI screen that will hold layout and widgets.
 		mScreen = new Screen();
+
+		mLabel = new Label();
+		mLabel->fillSpaceHorizontally();
+		mLabel->fillSpaceVertically();
+		mLabel->setMaxNumberOfLines(4);
+		mLabel->setFontSize(12);
 		//The widget that renders the animation
 		mGLView = new GLView(MAW_GL_VIEW);
 		mGLView->addGLViewListener(this);
 		mGLView->fillSpaceHorizontally();
-		mGLView->fillSpaceVertically();
+		mGLView->setHeight(screenHeight * 0.85);
+
+		VerticalLayout *vLayout = new VerticalLayout();
+		vLayout->fillSpaceHorizontally();
+		vLayout->fillSpaceVertically();
+		vLayout->addChild(mLabel);
+		vLayout->addChild(mGLView);
 
 		//Add the layout to the screen
-		mScreen->setMainWidget(mGLView);
+		mScreen->setMainWidget(vLayout);
 
 		//Show the screen
 		mScreen->show();
@@ -98,8 +144,8 @@ public:
 
 	void createLandscape()
 	{
-		GLfloat baseVCoords[9][3];
-		GLfloat baseTCoords[9][2];
+		GLfloat baseVCoords[4][3];
+		GLfloat baseTCoords[4][2];
 
 		baseTCoords[0][0] = 0.0f;  baseTCoords[0][1] = 0.0f;
 		baseVCoords[0][0] = -1.0f; baseVCoords[0][1] = -1.0f; baseVCoords[0][2] = 0.0f;
@@ -123,6 +169,59 @@ public:
 
 					mLandscape[x][y].tcoords[i][0] = ((x % TEXTURE_REPEATS) / segmentsPerTexture) + ((1.0f / segmentsPerTexture) * baseTCoords[i][0]); //* 0.8f;
 					mLandscape[x][y].tcoords[i][1] = ((y % TEXTURE_REPEATS) / segmentsPerTexture) + ((1.0f / segmentsPerTexture) * baseTCoords[i][1]); //* 0.8f;
+				}
+				vector plane[3];
+				plane[0].x = mLandscape[x][y].vcoords[0][0];
+				plane[0].y = mLandscape[x][y].vcoords[0][1];
+				plane[0].z = mLandscape[x][y].vcoords[0][2];
+				for(int i = 0; i < 2; i++)
+				{
+					if(i == 0)
+					{
+						plane[1].x = mLandscape[x][y].vcoords[1][0];
+						plane[1].y = mLandscape[x][y].vcoords[1][1];
+						plane[1].z = mLandscape[x][y].vcoords[1][2];
+
+						plane[2].x = mLandscape[x][y].vcoords[2][0];
+						plane[2].y = mLandscape[x][y].vcoords[2][1];
+						plane[2].z = mLandscape[x][y].vcoords[2][2];
+					}
+					else
+					{
+						plane[1].x = mLandscape[x][y].vcoords[2][0];
+						plane[1].y = mLandscape[x][y].vcoords[2][1];
+						plane[1].z = mLandscape[x][y].vcoords[2][2];
+
+						plane[2].x = mLandscape[x][y].vcoords[3][0];
+						plane[2].y = mLandscape[x][y].vcoords[3][1];
+						plane[2].z = mLandscape[x][y].vcoords[3][2];
+					}
+					vector planeVector;
+					planeVector.x = (plane[0].x + plane[1].x + plane[2].x) / 3;
+					planeVector.y = (plane[0].y + plane[1].y + plane[2].y) / 3;
+					planeVector.z = (plane[0].z + plane[1].z + plane[2].z) / 3;
+
+					mLandscape[x][y].distance[i] = sqrt(planeVector.x*planeVector.x + planeVector.y*planeVector.y + planeVector.z*planeVector.z);
+
+					vector v1, v2;
+					v1.x = plane[1].x - plane[0].x;
+					v1.y = plane[1].y - plane[0].y;
+					v1.z = plane[1].z - plane[0].z;
+
+					v2.x = plane[2].x - plane[1].x;
+					v2.y = plane[2].y - plane[1].y;
+					v2.z = plane[2].z - plane[1].z;
+
+					vector faceVector;
+					faceVector.x = v1.y*v2.z - v1.z*v2.y;
+					faceVector.y = v1.z*v2.x - v1.x*v2.z;
+					faceVector.z = v1.x*v2.y - v1.y*v2.x;
+
+					float vLength = sqrt(faceVector.x*faceVector.x + faceVector.y*faceVector.y + faceVector.z*faceVector.z);
+
+					mLandscape[x][y].normalVector[i].x = faceVector.x / vLength;
+					mLandscape[x][y].normalVector[i].y = faceVector.y / vLength;
+					mLandscape[x][y].normalVector[i].z = faceVector.z / vLength;
 				}
 			}
 		}
@@ -176,7 +275,7 @@ public:
 		// Set the depth value used when clearing the depth buffer.
 		glClearDepthf(1.0f);
 
-		glEnable(GL_BLEND);
+		//glEnable(GL_BLEND);
 
 		glBlendFunc(GL_ONE, GL_ONE);
 
@@ -236,30 +335,11 @@ public:
 	void sensorEvent(MASensor a)
 	{
 
-		float fx = -roundDown(a.values[0]);
-		float fy = roundDown(a.values[1]);
-		float fz = roundDown(a.values[2]);
+		mFacing.x = -a.values[0];
+		mFacing.y = a.values[1];
+		mFacing.z = a.values[2];
 
-		mFacing.x = (fx == 0)?0.0001:fx;
-		mFacing.y = (fy == 0)?0.0001:fy;
-		mFacing.z = (fz == 0)?0.0001:fz;
-	}
-
-	float roundDown(float x)
-	{
-		x = x * 10000;
-		long xint = (int)x;
-		return xint / 10000.0f;
-	}
-
-	/**
-	* This method is called if the touch-up event was inside the
-	* bounds of the button.
-	* @param button The button object that generated the event.
-	*/
-	virtual void buttonClicked(Widget* button)
-	{
-		((Button*) button)->setText("Hello World");
+		mFacing = mFilter.filter(mFacing);
 	}
 
 	void runTimerEvent()
@@ -275,7 +355,16 @@ public:
 			//Calculate and draw the positions for the new frame
 			checkCollision();
 			draw(currentTime);
-
+			mSecondsSinceLastUpdate += period;
+			if(mSecondsSinceLastUpdate > LABEL_UPDATE_PER)
+			{
+				mSecondsSinceLastUpdate = 0;
+				char buffer[256];
+				sprintf(buffer,
+				" Position - x:%f, y:%f, z:%f\n Speed - x:%f, y:%f, z:%f\n Absolute speed:%f, altitude:%f\n Segment - x:%d, y:%d, x:%4.5f, y:%4.5f, z:%4.5f",
+						mPosition.x,mPosition.y,mPosition.z,mVelocity.x,mVelocity.y,mVelocity.z,mAbsSpeed,mAltitude,mX,mY,mNormal.x,mNormal.y,mNormal.z);
+				mLabel->setText(buffer);
+			}
 			mPrevTime = currentTime;
 		}
 	}
@@ -302,9 +391,15 @@ public:
 		mVelocity.y += (mGravity.y + mAcceleration.y) * period;
 		mVelocity.z += (mGravity.z + mAcceleration.z) * period;
 
-		/*mVelocity.x += mGravity.x * period;
-		mVelocity.y += mGravity.y * period;
-		mVelocity.z += mGravity.z * period;*/
+		mAbsSpeed = sqrt(mVelocity.x*mVelocity.x + mVelocity.y*mVelocity.y + mVelocity.z*mVelocity.z);
+
+		if(mAbsSpeed > MAX_SPEED)
+		{
+			mVelocity.x = MAX_SPEED * mVelocity.x/mAbsSpeed;
+			mVelocity.y = MAX_SPEED * mVelocity.y/mAbsSpeed;
+			mVelocity.z = MAX_SPEED * mVelocity.z/mAbsSpeed;
+			mAbsSpeed = sqrt(mVelocity.x*mVelocity.x + mVelocity.y*mVelocity.y + mVelocity.z*mVelocity.z);
+		}
 
 		mPosition.x += mVelocity.x * period;
 		mPosition.y += mVelocity.y * period;
@@ -325,62 +420,52 @@ public:
 				{
 					mX = x;
 					mY = y;
-					vector plane[3];
+
 					float dx1 = segment->vcoords[1][0] - mPosition.x;
 					float dy1 = segment->vcoords[1][1] - mPosition.y;
 					float dx3 = segment->vcoords[3][0] - mPosition.x;
 					float dy3 = segment->vcoords[3][1] - mPosition.y;
+
 					float d1 = dx1 * dx1 + dy1 * dy1;
 					float d3 = dx3 * dx3 + dy3 * dy3;
+					int side;
 					if(d1 < d3)
 					{
-						plane[0].x = segment->vcoords[0][0];
-						plane[0].y = segment->vcoords[0][1];
-						plane[0].z = segment->vcoords[0][2];
-
-						plane[1].x = segment->vcoords[1][0];
-						plane[1].y = segment->vcoords[1][1];
-						plane[1].z = segment->vcoords[1][2];
-
-						plane[2].x = segment->vcoords[2][0];
-						plane[2].y = segment->vcoords[2][1];
-						plane[2].z = segment->vcoords[2][2];
+						side = 0;
 					}
 					else
 					{
-						plane[0].x = segment->vcoords[0][0];
-						plane[0].y = segment->vcoords[0][1];
-						plane[0].z = segment->vcoords[0][2];
-
-						plane[1].x = segment->vcoords[2][0];
-						plane[1].y = segment->vcoords[2][1];
-						plane[1].z = segment->vcoords[2][2];
-
-						plane[2].x = segment->vcoords[3][0];
-						plane[2].y = segment->vcoords[3][1];
-						plane[2].z = segment->vcoords[3][2];
+						side = 1;
 					}
-					vector planeVector;
-					planeVector.x = (plane[0].x + plane[1].x + plane[2].x) / 3;
-					planeVector.y = (plane[0].y + plane[1].y + plane[2].y) / 3;
-					planeVector.z = (plane[0].z + plane[1].z + plane[2].z) / 3;
 
-					float D = sqrt(planeVector.x*planeVector.x + planeVector.y*planeVector.y + planeVector.z*planeVector.z);
+					mNormal = segment->normalVector[side];
+					float D = segment->distance[side];
 
-					vector npv;
-					npv.x = planeVector.x / D;
-					npv.z = planeVector.y / D;
-					npv.y = planeVector.z / D;
-
-					if(npv.x*mPosition.x + npv.y*mPosition.y + npv.z*mPosition.z < -D)
+					float dot = mPosition.x * mNormal.x + mPosition.y * mNormal.y + mPosition.z * mNormal.z;
+					mAltitude = dot - D;
+					if(mAltitude < 5.0f)
 					{
-						maAlert("collision","sfdfsfd","OK",NULL,NULL);
+						if(		abs(mFacing.x + mNormal.x) < LANDING_DEVIATION &&
+								abs(mFacing.y + mNormal.y) < LANDING_DEVIATION &&
+								abs(mFacing.z + mNormal.z) < LANDING_DEVIATION &&
+								mAbsSpeed < LANDING_SPEED
+								)
+						{
+							maPanic(0,"You have landed successfully!");
+						}
+						else
+						{
+							maPanic(0,"You crashed and burned on the cold Lunar surface.");
+						}
 					}
-
-
 				}
 			}
 		}
+	}
+
+	float abs(float x)
+	{
+		return (x>0)?x:-x;
 	}
 
 	void draw(int currentTime)
@@ -428,34 +513,21 @@ public:
 		// Enable texture and vertex arrays
 		glEnableClientState(GL_VERTEX_ARRAY);
 		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-		//glEnableClientState( GL_COLOR_ARRAY );
-		// Set up the color array.
-		GLfloat colors[4*4] = {
-				1.0f, 0.0f, 0.0f, 1.0f,
-				0.0f, 1.0f, 0.0f, 1.0f,
-				0.0f, 0.0f, 1.0f, 1.0f,
-				1.0f, 1.0f, 0.0f, 1.0f
-			};
+
 		for(int x = 0; x < NUM_SEGMENTS; x++) {
 			for(int y = 0; y < NUM_SEGMENTS; y++) {
 				// Set pointers to vertex coordinates and texture coordinates.
 				glVertexPointer(3, GL_FLOAT, 0, mLandscape[x][y].vcoords);
 				glTexCoordPointer(2, GL_FLOAT, 0, mLandscape[x][y].tcoords);
-				//glColorPointer(4, GL_FLOAT, 0, colors);
-
 
 				// This draws the segmen.
 				glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, indices);
-
-
 			}
 		}
 		glPopMatrix();
 		// Disable texture and vertex arrays
 		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 		glDisableClientState(GL_VERTEX_ARRAY);
-
-
 	}
 
 	virtual void pointerPressEvent(MAPoint2d p)
@@ -470,10 +542,13 @@ public:
 
 private:
     Screen* mScreen;			//A Native UI screen
+    Label* mLabel;
     GLView* mGLView;
+    int mX, mY;
+    float mAltitude;
+    float mSecondsSinceLastUpdate;
+    float mAbsSpeed;
     int mPrevTime;
-    int mX;
-    int mY;
     GLuint mLunarTexture;
     bool mEnvironmentInitialized;
     landSegment mLandscape[NUM_SEGMENTS][NUM_SEGMENTS];
@@ -482,7 +557,9 @@ private:
     vector mGravity;
     vector mFacing;
     vector mAcceleration;
+    vector mNormal;
     bool mEnginesRunning;
+    LowPassFilter mFilter;
 };
 
 /**
