@@ -58,6 +58,14 @@ struct LowPassFilter {
 	float a, b;
 	vector previousState;
 };
+
+/*static int TestFunc(lua_State *L)
+{
+	maPanic(0,"sfdsfsfsdf");
+
+	return 1; // Number of results
+}*/
+
 /**
  * Moblet to be used as a template for a Native UI application.
  */
@@ -69,10 +77,6 @@ public:
 	 */
 	NativeUIMoblet()
 	{
-		if (!mLua.initialize())
-		{
-			maPanic(0,"Lua engine failed to initialize");
-		}
 		mPrevTime = maGetMilliSecondCount();
 		createUI();
 		createLandscape();
@@ -110,6 +114,16 @@ public:
 	{
 		// All the children will be deleted.
 		delete mScreen;
+	}
+
+	void initLua()
+	{
+		if (!mLua.initialize())
+		{
+			maPanic(0,"Lua engine failed to initialize");
+		}
+
+		mLua.eval("engine.TestFunc();");
 	}
 
 	/**
