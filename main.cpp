@@ -1,12 +1,14 @@
 #include <ma.h>
 #include <mavsprintf.h>
+#include <MAFS/File.h>
 #include <MAUtil/Moblet.h>
 #include <NativeUI/Widgets.h>
 #include <NativeUI/WidgetUtil.h>
-#include <GLES/gl.h>
 #include "MAHeaders.h"
 #include <madmath.h>
 #include "LuaEngine.h"
+#include "Renderer.h"
+#include "BundleDownloader.h"
 
 using namespace MAUtil;
 using namespace NativeUI;
@@ -20,19 +22,6 @@ using namespace NativeUI;
 #define LANDING_DEVIATION 0.3f
 #define LABEL_UPDATE_PER 0.3f
 
-
-struct vector{
-	float x;
-	float y;
-	float z;
-};
-
-struct landSegment{
-	GLfloat vcoords[4][3];
-	GLfloat tcoords[4][2];
-	vector normalVector[2];
-	float distance[2];
-};
 
 // A simple low pass filter used to
 // smoothen the noisy accelerometer
@@ -69,7 +58,7 @@ struct LowPassFilter {
 /**
  * Moblet to be used as a template for a Native UI application.
  */
-class NativeUIMoblet : public Moblet, public GLViewListener,public SensorListener, public TimerListener
+class NativeUIMoblet : public Moblet, public SensorListener, public TimerListener, public BundleListener
 {
 public:
 	/**
@@ -77,10 +66,29 @@ public:
 	 */
 	NativeUIMoblet()
 	{
-		mPrevTime = maGetMilliSecondCount();
-		createUI();
-		createLandscape();
+		mDownloader = new BundleDownloader(this);
+		initialize();
+	}
 
+	/**
+	 * Destructor.
+	 */
+	virtual ~NativeUIMoblet()
+	{
+		// All the children will be deleted.
+		delete mScreen;
+	}
+
+	void initialize()
+	{
+		mPrevTime = maGetMilliSecondCount();
+		initLua();
+		createUI();
+		mRenderer.init(mGLView);
+		mCamera = new camera;
+		mRenderer.setCamera(mCamera);
+		createLandscape();
+		mRenderer.setLandscape(mLandscape);
 		mPosition.x = 0;
 		mPosition.y = 0;
 		mPosition.z = 40;
@@ -107,23 +115,65 @@ public:
 		maSensorStart(1, -1);
 	}
 
-	/**
-	 * Destructor.
-	 */
-	virtual ~NativeUIMoblet()
-	{
-		// All the children will be deleted.
-		delete mScreen;
-	}
-
 	void initLua()
 	{
+		exractBin(LOCAL_FILES_BIN);
 		if (!mLua.initialize())
 		{
 			maPanic(0,"Lua engine failed to initialize");
 		}
+		String initScript;
+		readTextFromFile("Init.lua",initScript);
+		mLua.eval(initScript.c_str());
+	}
 
-		mLua.eval("engine.TestFunc();");
+	void exractBin(MAHandle bin)
+	{
+		int bufferSize = 1024;
+		char buffer[bufferSize];
+
+		int size = maGetSystemProperty(
+			"mosync.path.local",
+			buffer,
+			bufferSize);
+		mLocalPath = buffer;
+		setCurrentFileSystem(bin, 0);
+		int result = MAFS_extractCurrentFileSystem(buffer);
+		freeCurrentFileSystem();
+	}
+
+	bool readTextFromFile(
+		const MAUtil::String& filePath,
+		MAUtil::String& inText)
+	{
+		MAHandle file = maFileOpen((mLocalPath + filePath).c_str(), MA_ACCESS_READ);
+		if (file < 0)
+		{
+			return false;
+		}
+
+		int size = maFileSize(file);
+		if (size < 1)
+		{
+			return false;
+		}
+
+		// Allocate buffer with space for a null termination character.
+		char* buffer = (char*) malloc(sizeof(char) * (size + 1));
+
+		int result = maFileRead(file, buffer, size);
+
+		maFileClose(file);
+
+		buffer[size] = 0;
+		inText = buffer;
+
+		return result == 0;
+	}
+
+	virtual void bundleDownloaded(MAHandle data)
+	{
+		exractBin(data);
 	}
 
 	/**
@@ -144,9 +194,8 @@ public:
 		mLabel->setFontSize(12);
 		//The widget that renders the animation
 		mGLView = new GLView(MAW_GL_VIEW);
-		mGLView->addGLViewListener(this);
 		mGLView->fillSpaceHorizontally();
-		mGLView->setHeight(screenHeight * 0.85);
+		mGLView->setHeight((int)(screenHeight * 0.85));
 
 		VerticalLayout *vLayout = new VerticalLayout();
 		vLayout->fillSpaceHorizontally();
@@ -165,6 +214,9 @@ public:
 	{
 		GLfloat baseVCoords[4][3];
 		GLfloat baseTCoords[4][2];
+		mLandscape = new landscape;
+		mLandscape->numSegments = NUM_SEGMENTS*NUM_SEGMENTS;
+		mLandscape->segments = new landSegment[mLandscape->numSegments];
 
 		baseTCoords[0][0] = 0.0f;  baseTCoords[0][1] = 0.0f;
 		baseVCoords[0][0] = -1.0f; baseVCoords[0][1] = -1.0f; baseVCoords[0][2] = 0.0f;
@@ -176,51 +228,52 @@ public:
 		baseVCoords[3][0] = -1.0f; baseVCoords[3][1] = 1.0f; baseVCoords[3][2] = 0.0f;
 
 		float segmentsPerTexture = (float)NUM_SEGMENTS / TEXTURE_REPEATS;
+		int j = 0;
 		for(int x = 0; x < NUM_SEGMENTS; x++)
 		{
 			for(int y = 0; y < NUM_SEGMENTS; y++)
 			{
 				for(int i = 0; i < 4; i++)
 				{
-					mLandscape[x][y].vcoords[i][0] = 200.0f * ((x - NUM_SEGMENTS/2) * 2 + baseVCoords[i][0]) / NUM_SEGMENTS;
-					mLandscape[x][y].vcoords[i][1] = 200.0f * ((y - NUM_SEGMENTS/2) * 2 + baseVCoords[i][1]) / NUM_SEGMENTS;
-					mLandscape[x][y].vcoords[i][2] = 10.0f * getPointHeight(mLandscape[x][y].vcoords[i][0], mLandscape[x][y].vcoords[i][1]);
+					mLandscape->segments[j].vcoords[i][0] = 200.0f * ((x - NUM_SEGMENTS/2) * 2 + baseVCoords[i][0]) / NUM_SEGMENTS;
+					mLandscape->segments[j].vcoords[i][1] = 200.0f * ((y - NUM_SEGMENTS/2) * 2 + baseVCoords[i][1]) / NUM_SEGMENTS;
+					mLandscape->segments[j].vcoords[i][2] = 10.0f * getPointHeight(mLandscape->segments[j].vcoords[i][0], mLandscape->segments[j].vcoords[i][1]);
 
-					mLandscape[x][y].tcoords[i][0] = ((x % TEXTURE_REPEATS) / segmentsPerTexture) + ((1.0f / segmentsPerTexture) * baseTCoords[i][0]); //* 0.8f;
-					mLandscape[x][y].tcoords[i][1] = ((y % TEXTURE_REPEATS) / segmentsPerTexture) + ((1.0f / segmentsPerTexture) * baseTCoords[i][1]); //* 0.8f;
+					mLandscape->segments[j].tcoords[i][0] = ((x % TEXTURE_REPEATS) / segmentsPerTexture) + ((1.0f / segmentsPerTexture) * baseTCoords[i][0]); //* 0.8f;
+					mLandscape->segments[j].tcoords[i][1] = ((y % TEXTURE_REPEATS) / segmentsPerTexture) + ((1.0f / segmentsPerTexture) * baseTCoords[i][1]); //* 0.8f;
 				}
 				vector plane[3];
-				plane[0].x = mLandscape[x][y].vcoords[0][0];
-				plane[0].y = mLandscape[x][y].vcoords[0][1];
-				plane[0].z = mLandscape[x][y].vcoords[0][2];
+				plane[0].x = mLandscape->segments[j].vcoords[0][0];
+				plane[0].y = mLandscape->segments[j].vcoords[0][1];
+				plane[0].z = mLandscape->segments[j].vcoords[0][2];
 				for(int i = 0; i < 2; i++)
 				{
 					if(i == 0)
 					{
-						plane[1].x = mLandscape[x][y].vcoords[1][0];
-						plane[1].y = mLandscape[x][y].vcoords[1][1];
-						plane[1].z = mLandscape[x][y].vcoords[1][2];
+						plane[1].x = mLandscape->segments[j].vcoords[1][0];
+						plane[1].y = mLandscape->segments[j].vcoords[1][1];
+						plane[1].z = mLandscape->segments[j].vcoords[1][2];
 
-						plane[2].x = mLandscape[x][y].vcoords[2][0];
-						plane[2].y = mLandscape[x][y].vcoords[2][1];
-						plane[2].z = mLandscape[x][y].vcoords[2][2];
+						plane[2].x = mLandscape->segments[j].vcoords[2][0];
+						plane[2].y = mLandscape->segments[j].vcoords[2][1];
+						plane[2].z = mLandscape->segments[j].vcoords[2][2];
 					}
 					else
 					{
-						plane[1].x = mLandscape[x][y].vcoords[2][0];
-						plane[1].y = mLandscape[x][y].vcoords[2][1];
-						plane[1].z = mLandscape[x][y].vcoords[2][2];
+						plane[1].x = mLandscape->segments[j].vcoords[2][0];
+						plane[1].y = mLandscape->segments[j].vcoords[2][1];
+						plane[1].z = mLandscape->segments[j].vcoords[2][2];
 
-						plane[2].x = mLandscape[x][y].vcoords[3][0];
-						plane[2].y = mLandscape[x][y].vcoords[3][1];
-						plane[2].z = mLandscape[x][y].vcoords[3][2];
+						plane[2].x = mLandscape->segments[j].vcoords[3][0];
+						plane[2].y = mLandscape->segments[j].vcoords[3][1];
+						plane[2].z = mLandscape->segments[j].vcoords[3][2];
 					}
 					vector planeVector;
 					planeVector.x = (plane[0].x + plane[1].x + plane[2].x) / 3;
 					planeVector.y = (plane[0].y + plane[1].y + plane[2].y) / 3;
 					planeVector.z = (plane[0].z + plane[1].z + plane[2].z) / 3;
 
-					mLandscape[x][y].distance[i] = sqrt(planeVector.x*planeVector.x + planeVector.y*planeVector.y + planeVector.z*planeVector.z);
+					mLandscape->segments[j].distance[i] = sqrt(planeVector.x*planeVector.x + planeVector.y*planeVector.y + planeVector.z*planeVector.z);
 
 					vector v1, v2;
 					v1.x = plane[1].x - plane[0].x;
@@ -238,10 +291,11 @@ public:
 
 					float vLength = sqrt(faceVector.x*faceVector.x + faceVector.y*faceVector.y + faceVector.z*faceVector.z);
 
-					mLandscape[x][y].normalVector[i].x = faceVector.x / vLength;
-					mLandscape[x][y].normalVector[i].y = faceVector.y / vLength;
-					mLandscape[x][y].normalVector[i].z = faceVector.z / vLength;
+					mLandscape->segments[j].normalVector[i].x = faceVector.x / vLength;
+					mLandscape->segments[j].normalVector[i].y = faceVector.y / vLength;
+					mLandscape->segments[j].normalVector[i].z = faceVector.z / vLength;
 				}
+				j++;
 			}
 		}
 	}
@@ -253,91 +307,9 @@ public:
 		return (value>0)?value:0;
 	}
 
-	void glViewReady(GLView* glView)
-	{
-		//Set this GLView to receive OpenGL commands
-		mGLView->bind();
 
-		// Create the texture we will use for rendering.
-		createTexture();
 
-		// Initialize OpenGL.
-		initGL();
-	}
 
-	void createTexture()
-	{
-		// Create an OpenGL 2D texture from the image resource.
-		glEnable(GL_TEXTURE_2D);
-		glGenTextures(1, &mLunarTexture);
-		glBindTexture(GL_TEXTURE_2D, mLunarTexture);
-		maOpenGLTexImage2D(LUNAR_TEXTURE);
-
-		// Set texture parameters.
-		glTexParameterx(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTexParameterx(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	}
-
-	/**
-	 * Standard OpenGL initialization.
-	 */
-	void initGL()
-	{
-		//Configure the viewport
-		setViewport(mGLView->getWidth(), mGLView->getHeight());
-	    // Enable texture mapping.
-	    glEnable(GL_TEXTURE_2D);
-
-	    // Enable smooth shading.
-		glShadeModel(GL_SMOOTH);
-
-		// Set the depth value used when clearing the depth buffer.
-		glClearDepthf(1.0f);
-
-		//glEnable(GL_BLEND);
-
-		glBlendFunc(GL_ONE, GL_ONE);
-
-		mEnvironmentInitialized = true;
-	}
-
-	/**
-	 * Setup the projection matrix.
-	 */
-	void setViewport(int width, int height)
-	{
-		// Set the viewport to fill the GLView
-		glViewport(0, 0, (GLint)width, (GLint)height);
-
-		// Select the projection matrix.
-		glMatrixMode(GL_PROJECTION);
-
-		// Reset the projection matrix.
-		glLoadIdentity();
-
-		GLfloat ratio = (GLfloat)width / (GLfloat)height;
-		gluPerspective(45.0f, ratio, 0.1f, 100.0f);
-	}
-
-	/**
-	 * Standard OpenGL utility function for setting up the
-	 * perspective projection matrix.
-	 */
-	void gluPerspective(
-		GLfloat fovy,
-		GLfloat aspect,
-		GLfloat zNear,
-		GLfloat zFar)
-	{
-		//const float M_PI = 3.14159;
-
-		GLfloat ymax = zNear * tan(fovy * M_PI / 360.0);
-		GLfloat ymin = -ymax;
-		GLfloat xmin = ymin * aspect;
-		GLfloat xmax = ymax * aspect;
-
-		glFrustumf(xmin, xmax, ymin, ymax, zNear, zFar);
-	}
 
 	/**
 	 * Called when a key is pressed.
@@ -359,12 +331,14 @@ public:
 		mFacing.z = a.values[2];
 
 		mFacing = mFilter.filter(mFacing);
+
+		mCamera->facing = mFacing;
 	}
 
 	void runTimerEvent()
 	{
 		//Execute only if the screen is active
-		if(mEnvironmentInitialized)
+		if(true)
 		{
 			//Get the current system time
 			int currentTime = maGetMilliSecondCount();
@@ -373,7 +347,7 @@ public:
 			calculatePosition(period);
 			//Calculate and draw the positions for the new frame
 			checkCollision();
-			draw(currentTime);
+			mRenderer.draw();
 			mSecondsSinceLastUpdate += period;
 			if(mSecondsSinceLastUpdate > LABEL_UPDATE_PER)
 			{
@@ -423,59 +397,55 @@ public:
 		mPosition.x += mVelocity.x * period;
 		mPosition.y += mVelocity.y * period;
 		mPosition.z += mVelocity.z * period;
+
+		mCamera->position = mPosition;
 	}
 
 	void checkCollision()
 	{
-		for(int x = 0; x < NUM_SEGMENTS; x++)
+		for(int i = 0; i < mLandscape->numSegments; i++)
 		{
-			for(int y = 0; y < NUM_SEGMENTS; y++)
+			landSegment* segment = &(mLandscape->segments[i]);
+			if(	segment->vcoords[0][0] < mPosition.x &&
+				segment->vcoords[2][0] > mPosition.x &&
+				segment->vcoords[0][1] < mPosition.y &&
+				segment->vcoords[2][1] > mPosition.y)
 			{
-				landSegment* segment = &mLandscape[x][y];
-				if(	segment->vcoords[0][0] < mPosition.x &&
-					segment->vcoords[2][0] > mPosition.x &&
-					segment->vcoords[0][1] < mPosition.y &&
-					segment->vcoords[2][1] > mPosition.y)
+				float dx1 = segment->vcoords[1][0] - mPosition.x;
+				float dy1 = segment->vcoords[1][1] - mPosition.y;
+				float dx3 = segment->vcoords[3][0] - mPosition.x;
+				float dy3 = segment->vcoords[3][1] - mPosition.y;
+
+				float d1 = dx1 * dx1 + dy1 * dy1;
+				float d3 = dx3 * dx3 + dy3 * dy3;
+				int side;
+				if(d1 < d3)
 				{
-					mX = x;
-					mY = y;
+					side = 0;
+				}
+				else
+				{
+					side = 1;
+				}
 
-					float dx1 = segment->vcoords[1][0] - mPosition.x;
-					float dy1 = segment->vcoords[1][1] - mPosition.y;
-					float dx3 = segment->vcoords[3][0] - mPosition.x;
-					float dy3 = segment->vcoords[3][1] - mPosition.y;
+				mNormal = segment->normalVector[side];
+				float D = segment->distance[side];
 
-					float d1 = dx1 * dx1 + dy1 * dy1;
-					float d3 = dx3 * dx3 + dy3 * dy3;
-					int side;
-					if(d1 < d3)
+				float dot = mPosition.x * mNormal.x + mPosition.y * mNormal.y + mPosition.z * mNormal.z;
+				mAltitude = dot - D;
+				if(mAltitude < 5.0f)
+				{
+					if(		abs(mFacing.x + mNormal.x) < LANDING_DEVIATION &&
+							abs(mFacing.y + mNormal.y) < LANDING_DEVIATION &&
+							abs(mFacing.z + mNormal.z) < LANDING_DEVIATION &&
+							mAbsSpeed < LANDING_SPEED
+							)
 					{
-						side = 0;
+						maPanic(0,"You have landed successfully!");
 					}
 					else
 					{
-						side = 1;
-					}
-
-					mNormal = segment->normalVector[side];
-					float D = segment->distance[side];
-
-					float dot = mPosition.x * mNormal.x + mPosition.y * mNormal.y + mPosition.z * mNormal.z;
-					mAltitude = dot - D;
-					if(mAltitude < 5.0f)
-					{
-						if(		abs(mFacing.x + mNormal.x) < LANDING_DEVIATION &&
-								abs(mFacing.y + mNormal.y) < LANDING_DEVIATION &&
-								abs(mFacing.z + mNormal.z) < LANDING_DEVIATION &&
-								mAbsSpeed < LANDING_SPEED
-								)
-						{
-							maPanic(0,"You have landed successfully!");
-						}
-						else
-						{
-							maPanic(0,"You crashed and burned on the cold Lunar surface.");
-						}
+						maPanic(0,"You crashed and burned on the cold Lunar surface.");
 					}
 				}
 			}
@@ -487,67 +457,7 @@ public:
 		return (x>0)?x:-x;
 	}
 
-	void draw(int currentTime)
-	{
-		// Set the background color to be used when clearing the screen.
-		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 
-		// Clear the screen and the depth buffer.
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-		// Use the model matrix.
-		glMatrixMode(GL_MODELVIEW);
-
-		// Reset the model matrix.
-		glLoadIdentity();
-
-		renderLandscape();
-		// Wait (blocks) until all GL drawing commands to finish.
-		glFinish();
-
-		mGLView->redraw();
-	}
-
-	void renderLandscape()
-	{
-		// Array used to convert from QUAD to TRIANGLE_STRIP.
-		// QUAD is not available on the OpenGL implementation
-		// we are using.
-		GLubyte indices[4] = {0, 1, 3, 2};
-
-		// Select the texture to use when rendering the box.
-		glBindTexture(GL_TEXTURE_2D, mLunarTexture);
-
-
-		glPushMatrix();
-
-		glRotatef(180.0f * asin(mFacing.y)/M_PI, 1.0f, 0.0f, 0.0f);
-		glRotatef(180.0f * asin(mFacing.x)/M_PI, 0.0f, 1.0f, 0.0f);
-
-		glTranslatef(-mPosition.x, -mPosition.y, -mPosition.z);
-		//glScalef(20.0f, 20.0f, 0.0f);
-
-
-
-		// Enable texture and vertex arrays
-		glEnableClientState(GL_VERTEX_ARRAY);
-		glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-
-		for(int x = 0; x < NUM_SEGMENTS; x++) {
-			for(int y = 0; y < NUM_SEGMENTS; y++) {
-				// Set pointers to vertex coordinates and texture coordinates.
-				glVertexPointer(3, GL_FLOAT, 0, mLandscape[x][y].vcoords);
-				glTexCoordPointer(2, GL_FLOAT, 0, mLandscape[x][y].tcoords);
-
-				// This draws the segmen.
-				glDrawElements(GL_TRIANGLE_STRIP, 4, GL_UNSIGNED_BYTE, indices);
-			}
-		}
-		glPopMatrix();
-		// Disable texture and vertex arrays
-		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-		glDisableClientState(GL_VERTEX_ARRAY);
-	}
 
 	virtual void pointerPressEvent(MAPoint2d p)
 	{
@@ -568,9 +478,8 @@ private:
     float mSecondsSinceLastUpdate;
     float mAbsSpeed;
     int mPrevTime;
-    GLuint mLunarTexture;
-    bool mEnvironmentInitialized;
-    landSegment mLandscape[NUM_SEGMENTS][NUM_SEGMENTS];
+
+    landscape *mLandscape;
     vector mVelocity;
     vector mPosition;
     vector mGravity;
@@ -580,6 +489,11 @@ private:
     bool mEnginesRunning;
     LowPassFilter mFilter;
     MobileLua::LuaEngine mLua;
+    String mLocalPath;
+    Renderer mRenderer;
+    camera *mCamera;
+
+    BundleDownloader *mDownloader;
 };
 
 /**
